@@ -29,6 +29,7 @@
 {
     size_t width, height;
     BOOL responseFromCached;
+    __weak NSThread *_workerThread;
 }
 
 - (id)initWithRequest:(NSURLRequest *)request options:(SDWebImageDownloaderOptions)options progress:(void (^)(NSUInteger, long long))progressBlock completed:(void (^)(UIImage *, NSData *, NSError *, BOOL))completedBlock cancelled:(void (^)())cancelBlock
@@ -57,6 +58,8 @@
         return;
     }
 
+    _workerThread = [NSThread currentThread];
+
     self.executing = YES;
     self.connection = [NSURLConnection.alloc initWithRequest:self.request delegate:self startImmediately:NO];
 
@@ -70,18 +73,10 @@
         }
         [[NSNotificationCenter defaultCenter] postNotificationName:SDWebImageDownloadStartNotification object:self];
 
-        if (floor(NSFoundationVersionNumber) <= NSFoundationVersionNumber_iOS_5_1)
-        {
-            // Make sure to run the runloop in our background thread so it can process downloaded data
-            // Note: we use a timeout to work around an issue with NSURLConnection cancel under iOS 5
-            //       not waking up the runloop, leading to dead threads (see https://github.com/rs/SDWebImage/issues/466)
-            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 10, false);
-        }
-        else
-        {
-            CFRunLoopRun();
-        }
-
+        // Make sure to run the runloop in our background thread so it can process downloaded data
+        // Note: we use a timeout to work around an issue with NSURLConnection cancel under iOS 5
+        //       not waking up the runloop, leading to dead threads (see https://github.com/rs/SDWebImage/issues/466)
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 10, false);
         if (!self.isFinished)
         {
             [self.connection cancel];
@@ -99,6 +94,15 @@
 
 - (void)cancel
 {
+    if (_workerThread) {
+        [self performSelector:@selector(safeCancel) onThread:_workerThread withObject:nil waitUntilDone:NO];
+    } else {
+        [self safeCancel];
+    }
+}
+
+- (void)safeCancel
+{
     if (self.isFinished) return;
     [super cancel];
     if (self.cancelBlock) self.cancelBlock();
@@ -106,7 +110,9 @@
     if (self.connection)
     {
         [self.connection cancel];
-        [[NSNotificationCenter defaultCenter] postNotificationName:SDWebImageDownloadStopNotification object:self];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:SDWebImageDownloadStopNotification object:self];
+        });
 
         // As we cancelled the connection, its callback won't be called and thus won't
         // maintain the isFinished and isExecuting flags.
